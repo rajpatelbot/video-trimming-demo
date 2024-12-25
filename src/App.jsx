@@ -89,103 +89,29 @@ function App() {
     }
   };
 
-  const chunkTheVideo = async (
-    videoFile,
-    videoFileType,
-    videoDuration,
-    startTime,
-    endTime,
-    chunkSize = 50 * 1024 * 1024
-  ) => {
-    const totalChunks = Math.ceil(videoFile.size / chunkSize);
+  const chunkTheVideo = async (videoFile, videoFileType, chunkSize = 50 * 1024 * 1024) => {
+    const totalChunks = Math.ceil(videoFile.size / chunkSize),
+      chunkFiles = [];
     let currPosition = 0;
-    const relevantChunks = [];
 
     for (let i = 0; i < totalChunks; i++) {
       const chunk = videoFile.slice(currPosition, currPosition + chunkSize);
       currPosition += chunkSize;
-      const arrayBuffer = await chunk.arrayBuffer();
 
       // Calculate the chunk's start and end times based on the video duration
       const chunkStartTime = ((i * chunkSize) / videoFile.size) * videoDuration;
       const chunkEndTime = (((i + 1) * chunkSize) / videoFile.size) * videoDuration;
 
-      // Skip chunks that don't overlap with the trim range
-      if (endTime <= chunkStartTime || startTime >= chunkEndTime) {
-        continue; // Skip this chunk as it doesn't overlap with the trim times
-      }
-
-      // Initialize trimStart and trimEnd for the chunk
-      let trimStart = 0;
-      let trimEnd = chunkEndTime - chunkStartTime;
-
-      // If the chunk starts before the trim start time, adjust trimStart
-      if (startTime >= chunkStartTime && startTime < chunkEndTime) {
-        trimStart = startTime - chunkStartTime;
-      }
-
-      // If the chunk ends after the trim end time, adjust trimEnd
-      if (endTime > chunkStartTime && endTime <= chunkEndTime) {
-        trimEnd = endTime - chunkStartTime;
-      }
-
-      // If the chunk is fully inside the trim range, no adjustments are needed
-      if (chunkStartTime >= startTime && chunkEndTime <= endTime) {
-        trimStart = 0; // Start from the beginning of the chunk
-        trimEnd = chunkEndTime - chunkStartTime; // End at the end of the chunk
-      }
-
-      // Ensure trimStart and trimEnd are within the bounds of the chunk duration
-      trimStart = Math.max(trimStart, 0);
-      trimEnd = Math.min(trimEnd, chunkEndTime - chunkStartTime);
-
-      // Only process chunks that have a valid trim range
-      if (trimStart < trimEnd) {
+      // Include only chunks that intersect with the trimming range
+      if (chunkStartTime < endTime && chunkEndTime > startTime) {
         const chunkName = `chunk-${i}.${videoFileType}`;
+        const arrayBuffer = await chunk.arrayBuffer();
         ffmpeg.FS("writeFile", chunkName, new Uint8Array(arrayBuffer));
-
-        relevantChunks.push({
-          name: chunkName,
-          trimStart,
-          trimEnd,
-        });
+        chunkFiles.push(chunkName);
       }
     }
 
-    return relevantChunks;
-  };
-
-  const trimTheChunkedFiles = async (chunksFiles) => {
-    const trimmedChunks = [];
-
-    for (const chunk of chunksFiles) {
-      const chunkName = chunk.name,
-        trimStart = chunk.trimStart,
-        trimEnd = chunk.trimEnd;
-
-      console.log({ chunkName, trimStart, trimEnd });
-
-      const duration = trimEnd - trimStart;
-      const outputFileName = `output-trimmed-0.mp4`;
-
-      const trimmedChunk = await ffmpeg.run(
-        "-v",
-        "verbose",
-        "-i",
-        chunkName,
-        "-ss",
-        String(trimStart),
-        "-t",
-        String(duration),
-        "-c",
-        "copy",
-        outputFileName
-      );
-
-      trimmedChunks.push(trimmedChunk);
-    }
-
-    return trimmedChunks;
+    return chunkFiles;
   };
 
   const concateUint8Arrays = (arrays) => {
@@ -228,22 +154,41 @@ function App() {
       if (isScriptLoaded && videoFile) {
         const chunksFiles = await chunkTheVideo(videoFile, videoFileType);
 
-        const trimTheChunks = await trimTheChunkedFiles(chunksFiles);
-
-        console.log({ trimTheChunks });
-
         const concatChunks = await concatVideoChunks(chunksFiles, videoFileType);
 
-        const combinedVideo = ffmpeg.FS("readFile", concatChunks);
+        const duration = endTime - startTime;
+        const outputFileName = `output-trimmed-0.mp4`;
 
-        // Create a Blob for the concatenated video
-        const finalVideo = new Blob([combinedVideo.buffer], {
-          type: `video/${videoFileType}`,
+        await ffmpeg.run(
+          "-v",
+          "verbose",
+          "-i",
+          concatChunks,
+          "-ss",
+          String(startTime),
+          "-t",
+          String(duration),
+          "-c",
+          "copy",
+          "-movflags",
+          outputFileName
+        );
+
+        // Check if the output file exists after trimming
+        const outputFileExists = ffmpeg.FS("readdir", "/").includes(outputFileName);
+
+        if (!outputFileExists) {
+          throw new Error(`Output file ${outputFileName} does not exist after trim.`);
+        }
+
+        // Read the processed file and generate the Blob
+        const trimmedChunk = ffmpeg.FS("readFile", outputFileName);
+        const finalVideo = new Blob([trimmedChunk.buffer], {
+          type: "video/mp4",
         });
 
-        const blobURL = URL.createObjectURL(finalVideo);
-        console.log({ blobURL });
-        setVideoTrimmedUrl(blobURL);
+        // Create a URL for the trimmed video and set it
+        setVideoTrimmedUrl(URL.createObjectURL(finalVideo));
       }
     } catch (error) {
       console.error("Error in handleTrim:", error);
